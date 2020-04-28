@@ -9,9 +9,10 @@
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::{BuildHasher, Hash, Hasher};
-use core::iter::ExactSizeIterator;
+use core::iter::{ExactSizeIterator, FusedIterator};
 use core::mem::MaybeUninit;
 use core::ptr;
+use core::slice;
 
 pub struct HashMap<K, V, S, const LEN: usize> {
     hash_builder: S,
@@ -224,25 +225,33 @@ where
     pub fn hasher(&self) -> &S {
         &self.hash_builder
     }
+}
 
-    pub fn keys(&self) -> () {
-        todo!()
+impl<K, V, S, const LEN: usize> HashMap<K, V, S, LEN> {
+    pub fn keys(&self) -> Keys<'_, K, V> {
+        Keys { inner: self.iter() }
     }
 
-    pub fn values(&self) -> () {
-        todo!()
+    pub fn values(&self) -> Values<'_, K, V> {
+        Values { inner: self.iter() }
     }
 
-    pub fn values_mut(&mut self) -> () {
-        todo!()
+    pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
+        ValuesMut {
+            inner: self.iter_mut(),
+        }
     }
 
-    pub fn iter(&self) -> () {
-        todo!()
+    pub fn iter(&self) -> Iter<'_, K, V> {
+        Iter {
+            inner: self.table.0.iter(),
+        }
     }
 
-    pub fn iter_mut(&mut self) -> () {
-        todo!()
+    pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
+        IterMut {
+            inner: self.table.0.iter_mut(),
+        }
     }
 }
 
@@ -251,10 +260,6 @@ where
     K: Eq + Hash,
     S: BuildHasher,
 {
-    pub fn entry(&mut self, key: K) -> () {
-        todo!()
-    }
-
     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -301,6 +306,110 @@ where
         self.get(k).is_some()
     }
 }
+
+impl<'a, K, V, S, const LEN: usize> IntoIterator for &'a HashMap<K, V, S, LEN> {
+    type Item = (&'a K, &'a V);
+    type IntoIter = Iter<'a, K, V>;
+
+    fn into_iter(self) -> Iter<'a, K, V> {
+        self.iter()
+    }
+}
+
+impl<'a, K, V, S, const LEN: usize> IntoIterator for &'a mut HashMap<K, V, S, LEN> {
+    type Item = (&'a K, &'a mut V);
+    type IntoIter = IterMut<'a, K, V>;
+
+    fn into_iter(self) -> IterMut<'a, K, V> {
+        self.iter_mut()
+    }
+}
+
+impl<K, V, S, const LEN: usize> IntoIterator for HashMap<K, V, S, LEN> {
+    type Item = (K, V);
+    type IntoIter = IntoIter<K, V, LEN>;
+
+    fn into_iter(self) -> IntoIter<K, V, LEN> {
+        IntoIter { table: self.table }
+    }
+}
+
+pub struct IntoIter<K, V, const LEN: usize> {
+    table: Table<K, V, LEN>,
+}
+
+impl<K, V, const LEN: usize> Iterator for IntoIter<K, V, LEN> {
+    type Item = (K, V);
+
+    fn next(&mut self) -> Option<(K, V)> {
+        todo!()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        todo!()
+    }
+}
+
+impl<K, V, const LEN: usize> FusedIterator for IntoIter<K, V, LEN> {}
+impl<K, V, const LEN: usize> ExactSizeIterator for IntoIter<K, V, LEN> {
+    fn len(&self) -> usize {
+        todo!()
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug, const LEN: usize> fmt::Debug for IntoIter<K, V, LEN> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        todo!()
+    }
+}
+
+pub struct Iter<'a, K, V> {
+    inner: slice::Iter<'a, Node<K, V>>,
+}
+
+pub struct IterMut<'a, K, V> {
+    inner: slice::IterMut<'a, Node<K, V>>,
+}
+
+pub struct Keys<'a, K, V> {
+    inner: Iter<'a, K, V>,
+}
+
+pub struct Values<'a, K, V> {
+    inner: Iter<'a, K, V>,
+}
+
+pub struct ValuesMut<'a, K, V> {
+    inner: IterMut<'a, K, V>,
+}
+
+macro_rules! derive_iter {
+    ($ty:ty:Item = $item_ty:ty; -> $closure:expr) => {
+        impl<'a, K, V> Iterator for $ty {
+            type Item = $item_ty;
+
+            fn next(&mut self) -> Option<Self::Item> {
+                self.inner.next().map($closure)
+            }
+
+            fn size_hint(&self) -> (usize, Option<usize>) {
+                self.inner.size_hint()
+            }
+        }
+
+        impl<'a, K, V> FusedIterator for $ty {}
+        impl<'a, K, V> ExactSizeIterator for $ty {
+            fn len(&self) -> usize {
+                self.inner.len()
+            }
+        }
+    };
+}
+derive_iter!(Iter<'a, K, V>:Item = (&'a K, &'a V);          -> |node| (&node.key, &node.value));
+derive_iter!(IterMut<'a, K, V>:Item = (&'a K, &'a mut V);   -> |node| (&node.key, &mut node.value));
+derive_iter!(Keys<'a, K, V>:Item = &'a K;                   -> |(k, _)| k);
+derive_iter!(Values<'a, K, V>:Item = &'a V;                 -> |(_, v)| v);
+derive_iter!(ValuesMut<'a, K, V>:Item = &'a mut V;          -> |(_, v)| v);
 
 #[cfg(test)]
 mod test {
