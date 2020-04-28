@@ -1,7 +1,6 @@
 #![cfg_attr(not(test), no_std)]
 #![feature(
     const_generics,
-    const_int_pow,
     maybe_uninit_uninit_array,
     maybe_uninit_slice_assume_init,
     maybe_uninit_ref
@@ -128,6 +127,39 @@ where
         // SAFETY: the array has been properly initialized
         Table(unsafe { ptr::read(&mut array as *mut _ as *mut _) })
     }
+
+    fn find(&self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&Node<K, V>> {
+        let mut last = (hash % LEN as u64) as usize;
+        let mut entry = &self.0[last];
+        loop {
+            if predicate(&entry.key) {
+                break Some(entry);
+            }
+            if entry.next != last {
+                last = entry.next;
+                entry = &self.0[entry.next];
+            } else {
+                break None;
+            }
+        }
+    }
+
+    fn find_mut(&mut self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&mut Node<K, V>> {
+        let mut entry_slot = (hash % LEN as u64) as usize;
+        let mut entry = &self.0[entry_slot];
+        loop {
+            if predicate(&entry.key) {
+                break Some(entry_slot);
+            }
+            if entry.next != entry_slot {
+                entry_slot = entry.next;
+                entry = &self.0[entry.next];
+            } else {
+                break None;
+            }
+        }
+        .map(move |slot| &mut self.0[slot])
+    }
 }
 
 impl<K: fmt::Debug, V: fmt::Debug, const LEN: usize> fmt::Debug for Table<K, V, LEN> {
@@ -228,7 +260,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        todo!()
+        self.get_key_value(k).map(|(_, v)| v)
     }
 
     pub fn get_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<&mut V>
@@ -236,7 +268,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        todo!()
+        self.get_key_value_mut(k).map(|(_, v)| v)
     }
 
     pub fn get_key_value<Q: ?Sized>(&self, k: &Q) -> Option<(&K, &V)>
@@ -244,7 +276,10 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        todo!()
+        let hash = hash_key(&self.hash_builder, k);
+        self.table
+            .find(hash, |key| key.borrow() == k)
+            .map(|node| (&node.key, &node.value))
     }
 
     pub fn get_key_value_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<(&K, &mut V)>
@@ -252,7 +287,10 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        todo!()
+        let hash = hash_key(&self.hash_builder, k);
+        self.table
+            .find_mut(hash, |key| key.borrow() == k)
+            .map(|node| (&node.key, &mut node.value))
     }
 
     pub fn contains_key<Q: ?Sized>(&self, k: &Q) -> bool
@@ -260,16 +298,7 @@ where
         K: Borrow<Q>,
         Q: Hash + Eq,
     {
-        todo!()
-    }
-
-    pub fn update(&mut self, k: K, v: V) -> V {
-        todo!()
-    }
-
-    pub fn try_update(&mut self, k: K, v: V) -> Result<V, V> {
-        // returns v if k is not in this map else previous val
-        todo!()
+        self.get(k).is_some()
     }
 }
 
@@ -280,7 +309,18 @@ mod test {
     type HashMap<const LEN: usize> = super::HashMap<u32, u32, HashBuilder, LEN>;
 
     #[test]
-    fn test_equal_elemnts() {
+    fn test_get() {
+        let foo = HashMap::<5>::new(vec![(0, 0), (3, 3), (5, 5), (8, 8), (1, 1)]);
+
+        assert_eq!(foo.get(&0), Some(&0));
+        assert_eq!(foo.get(&1), Some(&1));
+        assert_eq!(foo.get(&3), Some(&3));
+        assert_eq!(foo.get(&5), Some(&5));
+        assert_eq!(foo.get(&8), Some(&8));
+    }
+
+    #[test]
+    fn test_equal_elements() {
         // FIXME should this error, or is this fine and considered a logical error?
         let foo = HashMap::<2>::new(vec![(0, 0), (0, 0)]);
 
