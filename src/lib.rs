@@ -354,6 +354,27 @@ derive_iter!(ValuesMut<'a, K, V>:Item = &'a mut V;          -> |(_, v)| v);
 #[derive(Clone)]
 struct Table<K, V, const LEN: usize>([Node<K, V>; LEN]);
 
+struct TableInitGuard<K, V, const LEN: usize> {
+    table: [MaybeUninit<Node<K, V>>; LEN],
+    init_map: [bool; LEN],
+}
+
+impl<K, V, const LEN: usize> TableInitGuard<K, V, LEN> {}
+
+impl<K, V, const LEN: usize> Drop for TableInitGuard<K, V, LEN> {
+    fn drop(&mut self) {
+        for (entry, _) in self
+            .table
+            .iter_mut()
+            .zip(self.init_map.iter())
+            .filter(|(_, &initialized)| initialized)
+        {
+            // SAFETY: We track what elements are initialized so this is safe to drop
+            unsafe { ptr::drop_in_place(entry.as_mut_ptr()) };
+        }
+    }
+}
+
 impl<K, V, const LEN: usize> Table<K, V, LEN>
 where
     K: Hash,
@@ -368,92 +389,99 @@ where
             return Err(IterSizeMismatch);
         }
 
-        // TODO: drop initialized elements on panic. even if we don't panic anywhere, the iterator might
-        let mut array: [MaybeUninit<Node<K, V>>; LEN] = MaybeUninit::uninit_array();
-        let mut slot_map: [bool; LEN] = [false; LEN];
+        let mut guard: TableInitGuard<K, V, LEN> = TableInitGuard {
+            table: MaybeUninit::uninit_array(),
+            init_map: [false; LEN],
+        };
+        let table = {
+            let (table, init_map) = (&mut guard.table, &mut guard.init_map);
 
-        for (key, value) in iter {
-            let slot = hash_key(hash_builder, &key) as usize % LEN;
-            // already occupied
-            if slot_map[slot] {
-                let next_free_slot = (0..LEN)
-                    .map(|i| i + slot)
-                    .find(|&idx| !slot_map[idx % LEN])
-                    .expect("bug: array is full");
-                // SAFETY: we checked that the slot is initialized
-                let (prev, next) = unsafe {
-                    let slot = array[slot].get_ref();
-                    (slot.prev, slot.next)
-                };
-                // make room for new node, put previous in a free spot
-                array.swap(slot, next_free_slot);
-                // then write new node into the uninitialized memory and fix links
-                // A head, prepend this new node to the list
-                if prev == slot {
-                    array[slot] = MaybeUninit::new(Node {
-                        key,
-                        value,
-                        // head, so point prev to self
-                        prev: slot,
-                        // point to previous head
-                        next: next_free_slot,
-                    });
-                    // SAFETY: `next_free_slot` has been initialized this iteration,
-                    //  `next` has been initialized in an earlier iteration
-                    unsafe {
-                        // slot was single, so turn it into a tail
-                        if next == slot {
-                            array[next_free_slot].get_mut().next = next_free_slot;
-                        // otherwise fix links due to element move
-                        } else {
-                            array[next].get_mut().prev = next_free_slot;
-                            array[next_free_slot].get_mut().prev = slot;
+            for (key, value) in iter {
+                let slot = hash_key(hash_builder, &key) as usize % LEN;
+                // already occupied
+                if init_map[slot] {
+                    let next_free_slot = (0..LEN)
+                        .map(|i| i + slot)
+                        .find(|&idx| !init_map[idx % LEN])
+                        .expect("bug: array is full");
+                    // SAFETY: we checked that the slot is initialized
+                    let (prev, next) = unsafe {
+                        let slot = table[slot].get_ref();
+                        (slot.prev, slot.next)
+                    };
+                    // make room for new node, put previous in a free spot
+                    table.swap(slot, next_free_slot);
+                    // then write new node into the uninitialized memory and fix links
+                    // A head, prepend this new node to the list
+                    if prev == slot {
+                        table[slot] = MaybeUninit::new(Node {
+                            key,
+                            value,
+                            // head, so point prev to self
+                            prev: slot,
+                            // point to previous head
+                            next: next_free_slot,
+                        });
+                        // SAFETY: `next_free_slot` has been initialized this iteration,
+                        //  `next` has been initialized in an earlier iteration
+                        unsafe {
+                            // slot was single, so turn it into a tail
+                            if next == slot {
+                                table[next_free_slot].get_mut().next = next_free_slot;
+                            // otherwise fix links due to element move
+                            } else {
+                                table[next].get_mut().prev = next_free_slot;
+                                table[next_free_slot].get_mut().prev = slot;
+                            }
+                        }
+                    // Not a head, this new node becomes a new list
+                    } else {
+                        table[slot] = MaybeUninit::new(Node {
+                            key,
+                            value,
+                            // we are a new chain, so point to self
+                            prev: slot,
+                            next: slot,
+                        });
+                        // SAFETY: `next_free_slot` has been initialized this iteration,
+                        //  `next` and `prev` have been initialized in an earlier iteration
+                        unsafe {
+                            // place the new node into the now free slot
+                            table[prev].get_mut().next = next_free_slot;
+                            // slot was a tail
+                            if next == slot {
+                                // uphold tail's invariant of pointing to itself
+                                table[next_free_slot].get_mut().next = next_free_slot;
+                            // slot was in the middle of a list
+                            } else {
+                                // update invalidated back pointer of the previous second element
+                                table[next].get_mut().prev = next_free_slot;
+                            }
                         }
                     }
-                // Not a head, this new node becomes a new list
+
+                    init_map[next_free_slot] = true;
+                // free spot yay
                 } else {
-                    array[slot] = MaybeUninit::new(Node {
+                    table[slot] = MaybeUninit::new(Node {
                         key,
                         value,
-                        // we are a new chain, so point to self
+                        // is head
                         prev: slot,
+                        // is tail
                         next: slot,
                     });
-                    // SAFETY: `next_free_slot` has been initialized this iteration,
-                    //  `next` and `prev` have been initialized in an earlier iteration
-                    unsafe {
-                        // place the new node into the now free slot
-                        array[prev].get_mut().next = next_free_slot;
-                        // slot was a tail
-                        if next == slot {
-                            // uphold tail's invariant of pointing to itself
-                            array[next_free_slot].get_mut().next = next_free_slot;
-                        // slot was in the middle of a list
-                        } else {
-                            // update invalidated back pointer of the previous second element
-                            array[next].get_mut().prev = next_free_slot;
-                        }
-                    }
+                    init_map[slot] = true;
                 }
-
-                slot_map[next_free_slot] = true;
-            // free spot yay
-            } else {
-                array[slot] = MaybeUninit::new(Node {
-                    key,
-                    value,
-                    // is head
-                    prev: slot,
-                    // is tail
-                    next: slot,
-                });
-                slot_map[slot] = true;
             }
-        }
-        debug_assert!(slot_map.iter().copied().all(core::convert::identity));
-        // SAFETY: the array has been properly initialized
-        //  Is this the current best way to turn a [MaybeUninit<T>; _] into a [T; _]?
-        Ok(Table(unsafe { ptr::read(&mut array as *mut _ as *mut _) }))
+            debug_assert!(init_map.iter().copied().all(core::convert::identity));
+            // SAFETY: the array has been properly initialized
+            //  Is this the current best way to turn a [MaybeUninit<T>; _] into a [T; _]?
+            Table(unsafe { ptr::read(table as *mut _ as *mut [Node<K, V>; LEN]) })
+        };
+        // no panic happened, so don't run its Drop impl
+        core::mem::forget(guard);
+        Ok(table)
     }
 
     fn find<Q: ?Sized>(&self, hash: u64, key: &Q) -> Option<&Node<K, V>>
@@ -673,5 +701,36 @@ mod test {
                 },
             ],
         );
+    }
+
+    #[test]
+    fn test_init_guard() {
+        use std::sync::Arc;
+        let count = Arc::new(());
+
+        let _ = std::panic::catch_unwind(|| {
+            super::HashMap::<u32, Arc<()>, nohash_hasher::BuildNoHashHasher<u32>, 10>::new(
+                vec![
+                    (0, Arc::clone(&count)),
+                    (1, Arc::clone(&count)),
+                    (2, Arc::clone(&count)),
+                    (3, Arc::clone(&count)),
+                    (4, Arc::clone(&count)),
+                    (5, Arc::clone(&count)),
+                    (6, Arc::clone(&count)),
+                    (7, Arc::clone(&count)),
+                    (8, Arc::clone(&count)),
+                    (9, Arc::clone(&count)),
+                ]
+                .into_iter()
+                .inspect(|&(k, _)| {
+                    if k == 6 {
+                        panic!()
+                    }
+                }),
+            )
+            .unwrap();
+        });
+        assert_eq!(Arc::strong_count(&count), 1);
     }
 }
