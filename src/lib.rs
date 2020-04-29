@@ -1,11 +1,11 @@
 #![cfg_attr(not(test), no_std)]
 #![feature(
     const_generics,
+    const_if_match,
     maybe_uninit_uninit_array,
     maybe_uninit_slice_assume_init,
     maybe_uninit_ref
 )]
-
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::{BuildHasher, Hash, Hasher};
@@ -14,6 +14,13 @@ use core::mem::MaybeUninit;
 use core::ptr;
 use core::slice;
 
+fn hash_key<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, key: &K) -> u64 {
+    let mut state = hash_builder.build_hasher();
+    key.hash(&mut state);
+    state.finish()
+}
+
+#[derive(Clone)]
 pub struct HashMap<K, V, S, const LEN: usize> {
     hash_builder: S,
     table: Table<K, V, LEN>,
@@ -21,169 +28,8 @@ pub struct HashMap<K, V, S, const LEN: usize> {
 
 impl<K: fmt::Debug, V: fmt::Debug, S, const LEN: usize> fmt::Debug for HashMap<K, V, S, LEN> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("HashMap")
-            .field("table", &self.table)
-            .finish()
+        f.debug_map().entries(self.iter()).finish()
     }
-}
-
-struct Table<K, V, const LEN: usize>([Node<K, V>; LEN]);
-
-impl<K, V, const LEN: usize> Table<K, V, LEN>
-where
-    K: Hash,
-{
-    pub fn new<I>(hash_builder: &impl BuildHasher, iter: I) -> Self
-    where
-        I: IntoIterator<Item = (K, V)>,
-        I::IntoIter: ExactSizeIterator,
-    {
-        let iter = iter.into_iter();
-        if iter.len() != LEN {
-            unimplemented!("err")
-        }
-
-        // TODO: drop initialized elements on panic. even if we don't panic anywhere, the iterator might
-        let mut array: [MaybeUninit<Node<K, V>>; LEN] = MaybeUninit::uninit_array();
-        let mut slot_map: [bool; LEN] = [false; LEN];
-
-        for (key, value) in iter {
-            let slot = hash_key(hash_builder, &key) as usize % LEN;
-            // already occupied
-            if slot_map[slot] {
-                let next_free_slot = (0..LEN)
-                    .map(|i| i + slot)
-                    .find(|&idx| !slot_map[idx % LEN])
-                    .expect("bug: array is full");
-                let (prev, next) = unsafe {
-                    let slot = array[slot].get_ref();
-                    (slot.prev, slot.next)
-                };
-                // make room for new node, put previous in a free spot
-                array.swap(slot, next_free_slot);
-                // then write new node into the uninitialized memory and fix links
-                // A head, prepend this new node to the list
-                if prev == slot {
-                    array[slot] = MaybeUninit::new(Node {
-                        key,
-                        value,
-                        // head, so point prev to self
-                        prev: slot,
-                        // point to previous head
-                        next: next_free_slot,
-                    });
-                    // SAFETY: `next_free_slot` has been initialized this iteration,
-                    //  `next` has been initialized in an earlier iteration
-                    unsafe {
-                        // slot was single, so turn it into a tail
-                        if next == slot {
-                            array[next_free_slot].get_mut().next = next_free_slot;
-                        // otherwise fix links due to element move
-                        } else {
-                            array[next].get_mut().prev = next_free_slot;
-                            array[next_free_slot].get_mut().prev = slot;
-                        }
-                    }
-                // Not a head, this new node becomes a new list
-                } else {
-                    array[slot] = MaybeUninit::new(Node {
-                        key,
-                        value,
-                        // we are a new chain, so point to self
-                        prev: slot,
-                        next: slot,
-                    });
-                    // SAFETY: `next_free_slot` has been initialized this iteration,
-                    //  `next` and `prev` have been initialized in an earlier iteration
-                    unsafe {
-                        // place the new node into the now free slot
-                        array[prev].get_mut().next = next_free_slot;
-                        // slot was a tail
-                        if next == slot {
-                            // uphold tail's invariant of pointing to itself
-                            array[next_free_slot].get_mut().next = next_free_slot;
-                        // slot was in the middle of a list
-                        } else {
-                            // update invalidated back pointer of the previous second element
-                            array[next].get_mut().prev = next_free_slot;
-                        }
-                    }
-                }
-
-                slot_map[next_free_slot] = true;
-            // free spot yay
-            } else {
-                array[slot] = MaybeUninit::new(Node {
-                    key,
-                    value,
-                    // is head
-                    prev: slot,
-                    // is tail
-                    next: slot,
-                });
-                slot_map[slot] = true;
-            }
-        }
-        debug_assert!(slot_map.iter().copied().all(core::convert::identity));
-        // SAFETY: the array has been properly initialized
-        Table(unsafe { ptr::read(&mut array as *mut _ as *mut _) })
-    }
-
-    fn find(&self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&Node<K, V>> {
-        let mut last = (hash % LEN as u64) as usize;
-        let mut entry = &self.0[last];
-        loop {
-            if predicate(&entry.key) {
-                break Some(entry);
-            }
-            if entry.next != last {
-                last = entry.next;
-                entry = &self.0[entry.next];
-            } else {
-                break None;
-            }
-        }
-    }
-
-    fn find_mut(&mut self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&mut Node<K, V>> {
-        let mut entry_slot = (hash % LEN as u64) as usize;
-        let mut entry = &self.0[entry_slot];
-        loop {
-            if predicate(&entry.key) {
-                break Some(entry_slot);
-            }
-            if entry.next != entry_slot {
-                entry_slot = entry.next;
-                entry = &self.0[entry.next];
-            } else {
-                break None;
-            }
-        }
-        .map(move |slot| &mut self.0[slot])
-    }
-}
-
-impl<K: fmt::Debug, V: fmt::Debug, const LEN: usize> fmt::Debug for Table<K, V, LEN> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Table").field(&&self.0[..]).finish()
-    }
-}
-
-#[derive(Debug, PartialEq)]
-struct Node<K, V> {
-    key: K,
-    value: V,
-    // if pref == self -> head
-    // if pref == self && next == self -> single
-    prev: usize,
-    // if next = self -> tail
-    next: usize,
-}
-
-fn hash_key<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, key: &K) -> u64 {
-    let mut state = hash_builder.build_hasher();
-    key.hash(&mut state);
-    state.finish()
 }
 
 impl<K, V, S, const LEN: usize> HashMap<K, V, S, LEN>
@@ -410,6 +256,161 @@ derive_iter!(IterMut<'a, K, V>:Item = (&'a K, &'a mut V);   -> |node| (&node.key
 derive_iter!(Keys<'a, K, V>:Item = &'a K;                   -> |(k, _)| k);
 derive_iter!(Values<'a, K, V>:Item = &'a V;                 -> |(_, v)| v);
 derive_iter!(ValuesMut<'a, K, V>:Item = &'a mut V;          -> |(_, v)| v);
+
+#[derive(Clone)]
+struct Table<K, V, const LEN: usize>([Node<K, V>; LEN]);
+
+impl<K, V, const LEN: usize> Table<K, V, LEN>
+where
+    K: Hash,
+{
+    fn new<I>(hash_builder: &impl BuildHasher, iter: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let iter = iter.into_iter();
+        if iter.len() != LEN {
+            unimplemented!("err")
+        }
+
+        // TODO: drop initialized elements on panic. even if we don't panic anywhere, the iterator might
+        let mut array: [MaybeUninit<Node<K, V>>; LEN] = MaybeUninit::uninit_array();
+        let mut slot_map: [bool; LEN] = [false; LEN];
+
+        for (key, value) in iter {
+            let slot = hash_key(hash_builder, &key) as usize % LEN;
+            // already occupied
+            if slot_map[slot] {
+                let next_free_slot = (0..LEN)
+                    .map(|i| i + slot)
+                    .find(|&idx| !slot_map[idx % LEN])
+                    .expect("bug: array is full");
+                let (prev, next) = unsafe {
+                    let slot = array[slot].get_ref();
+                    (slot.prev, slot.next)
+                };
+                // make room for new node, put previous in a free spot
+                array.swap(slot, next_free_slot);
+                // then write new node into the uninitialized memory and fix links
+                // A head, prepend this new node to the list
+                if prev == slot {
+                    array[slot] = MaybeUninit::new(Node {
+                        key,
+                        value,
+                        // head, so point prev to self
+                        prev: slot,
+                        // point to previous head
+                        next: next_free_slot,
+                    });
+                    // SAFETY: `next_free_slot` has been initialized this iteration,
+                    //  `next` has been initialized in an earlier iteration
+                    unsafe {
+                        // slot was single, so turn it into a tail
+                        if next == slot {
+                            array[next_free_slot].get_mut().next = next_free_slot;
+                        // otherwise fix links due to element move
+                        } else {
+                            array[next].get_mut().prev = next_free_slot;
+                            array[next_free_slot].get_mut().prev = slot;
+                        }
+                    }
+                // Not a head, this new node becomes a new list
+                } else {
+                    array[slot] = MaybeUninit::new(Node {
+                        key,
+                        value,
+                        // we are a new chain, so point to self
+                        prev: slot,
+                        next: slot,
+                    });
+                    // SAFETY: `next_free_slot` has been initialized this iteration,
+                    //  `next` and `prev` have been initialized in an earlier iteration
+                    unsafe {
+                        // place the new node into the now free slot
+                        array[prev].get_mut().next = next_free_slot;
+                        // slot was a tail
+                        if next == slot {
+                            // uphold tail's invariant of pointing to itself
+                            array[next_free_slot].get_mut().next = next_free_slot;
+                        // slot was in the middle of a list
+                        } else {
+                            // update invalidated back pointer of the previous second element
+                            array[next].get_mut().prev = next_free_slot;
+                        }
+                    }
+                }
+
+                slot_map[next_free_slot] = true;
+            // free spot yay
+            } else {
+                array[slot] = MaybeUninit::new(Node {
+                    key,
+                    value,
+                    // is head
+                    prev: slot,
+                    // is tail
+                    next: slot,
+                });
+                slot_map[slot] = true;
+            }
+        }
+        debug_assert!(slot_map.iter().copied().all(core::convert::identity));
+        // SAFETY: the array has been properly initialized
+        Table(unsafe { ptr::read(&mut array as *mut _ as *mut _) })
+    }
+
+    fn find(&self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&Node<K, V>> {
+        let mut last = (hash % LEN as u64) as usize;
+        let mut entry = &self.0[last];
+        loop {
+            if predicate(&entry.key) {
+                break Some(entry);
+            }
+            if entry.next != last {
+                last = entry.next;
+                entry = &self.0[entry.next];
+            } else {
+                break None;
+            }
+        }
+    }
+
+    fn find_mut(&mut self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&mut Node<K, V>> {
+        let mut entry_slot = (hash % LEN as u64) as usize;
+        let mut entry = &self.0[entry_slot];
+        loop {
+            if predicate(&entry.key) {
+                break Some(entry_slot);
+            }
+            if entry.next != entry_slot {
+                entry_slot = entry.next;
+                entry = &self.0[entry.next];
+            } else {
+                break None;
+            }
+        }
+        .map(move |slot| &mut self.0[slot])
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug, const LEN: usize> fmt::Debug for Table<K, V, LEN> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("Table").field(&&self.0[..]).finish()
+    }
+}
+
+#[derive(Debug, Clone)]
+#[cfg_attr(test, derive(PartialEq))]
+struct Node<K, V> {
+    key: K,
+    value: V,
+    // if pref == self -> head
+    // if pref == self && next == self -> single
+    prev: usize,
+    // if next = self -> tail
+    next: usize,
+}
 
 #[cfg(test)]
 mod test {
