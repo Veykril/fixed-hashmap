@@ -9,8 +9,9 @@
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::{BuildHasher, Hash, Hasher};
-use core::iter::{ExactSizeIterator, FusedIterator};
+use core::iter::{ExactSizeIterator, FromIterator, FusedIterator};
 use core::mem::MaybeUninit;
+use core::ops;
 use core::ptr;
 use core::slice;
 
@@ -24,12 +25,6 @@ fn hash_key<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, key: &K) -> u64 {
 pub struct HashMap<K, V, S, const LEN: usize> {
     hash_builder: S,
     table: Table<K, V, LEN>,
-}
-
-impl<K: fmt::Debug, V: fmt::Debug, S, const LEN: usize> fmt::Debug for HashMap<K, V, S, LEN> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_map().entries(self.iter()).finish()
-    }
 }
 
 impl<K, V, S, const LEN: usize> HashMap<K, V, S, LEN>
@@ -150,6 +145,57 @@ where
         Q: Hash + Eq,
     {
         self.get(k).is_some()
+    }
+}
+
+impl<K: fmt::Debug, V: fmt::Debug, S, const LEN: usize> fmt::Debug for HashMap<K, V, S, LEN> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_map().entries(self.iter()).finish()
+    }
+}
+
+impl<K, V, S, const LEN: usize> PartialEq for HashMap<K, V, S, LEN>
+where
+    K: Eq + Hash,
+    V: PartialEq,
+    S: BuildHasher,
+{
+    fn eq(&self, other: &Self) -> bool {
+        self.iter()
+            .all(|(k, v)| other.get(k).map_or(false, |v2| v == v2))
+    }
+}
+
+impl<K, V, S, const LEN: usize> Eq for HashMap<K, V, S, LEN>
+where
+    K: Eq + Hash,
+    V: Eq,
+    S: BuildHasher,
+{
+}
+
+impl<K, Q: ?Sized, V, S, const LEN: usize> ops::Index<&'_ Q> for HashMap<K, V, S, LEN>
+where
+    K: Eq + Hash + Borrow<Q>,
+    Q: Eq + Hash,
+    S: BuildHasher,
+{
+    type Output = V;
+    fn index(&self, key: &Q) -> &Self::Output {
+        self.get(key).expect("no entry found for key")
+    }
+}
+
+// hashmaps in rust currently dont implement this due to the possibility of IndexSet being a thing in the future
+// this map does not support inserting after creation so its fine for us to implement
+impl<K, Q: ?Sized, V, S, const LEN: usize> ops::IndexMut<&'_ Q> for HashMap<K, V, S, LEN>
+where
+    K: Eq + Hash + Borrow<Q>,
+    Q: Eq + Hash,
+    S: BuildHasher,
+{
+    fn index_mut(&mut self, key: &Q) -> &mut Self::Output {
+        self.get_mut(key).expect("no entry found for key")
     }
 }
 
