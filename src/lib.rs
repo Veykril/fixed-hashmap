@@ -39,6 +39,7 @@ where
     K: Hash,
     S: BuildHasher + Default,
 {
+    #[inline]
     pub fn new<I>(iter: I) -> Result<Self, IterSizeMismatch>
     where
         I: IntoIterator<Item = (K, V)>,
@@ -71,26 +72,31 @@ where
 }
 
 impl<K, V, S, const LEN: usize> HashMap<K, V, S, LEN> {
+    #[inline]
     pub fn keys(&self) -> Keys<'_, K, V> {
         Keys { inner: self.iter() }
     }
 
+    #[inline]
     pub fn values(&self) -> Values<'_, K, V> {
         Values { inner: self.iter() }
     }
 
+    #[inline]
     pub fn values_mut(&mut self) -> ValuesMut<'_, K, V> {
         ValuesMut {
             inner: self.iter_mut(),
         }
     }
 
+    #[inline]
     pub fn iter(&self) -> Iter<'_, K, V> {
         Iter {
             inner: self.table.0.iter(),
         }
     }
 
+    #[inline]
     pub fn iter_mut(&mut self) -> IterMut<'_, K, V> {
         IterMut {
             inner: self.table.0.iter_mut(),
@@ -103,6 +109,7 @@ where
     K: Eq + Hash,
     S: BuildHasher,
 {
+    #[inline]
     pub fn get<Q: ?Sized>(&self, k: &Q) -> Option<&V>
     where
         K: Borrow<Q>,
@@ -111,6 +118,7 @@ where
         self.get_key_value(k).map(|(_, v)| v)
     }
 
+    #[inline]
     pub fn get_mut<Q: ?Sized>(&mut self, k: &Q) -> Option<&mut V>
     where
         K: Borrow<Q>,
@@ -126,7 +134,7 @@ where
     {
         let hash = hash_key(&self.hash_builder, k);
         self.table
-            .find(hash, |key| key.borrow() == k)
+            .find(hash, k)
             .map(|node| (&node.key, &node.value))
     }
 
@@ -137,10 +145,11 @@ where
     {
         let hash = hash_key(&self.hash_builder, k);
         self.table
-            .find_mut(hash, |key| key.borrow() == k)
+            .find_mut(hash, k)
             .map(|node| (&node.key, &mut node.value))
     }
 
+    #[inline]
     pub fn contains_key<Q: ?Sized>(&self, k: &Q) -> bool
     where
         K: Borrow<Q>,
@@ -183,6 +192,7 @@ where
     S: BuildHasher,
 {
     type Output = V;
+    #[inline]
     fn index(&self, key: &Q) -> &Self::Output {
         self.get(key).expect("no entry found for key")
     }
@@ -196,6 +206,7 @@ where
     Q: Eq + Hash,
     S: BuildHasher,
 {
+    #[inline]
     fn index_mut(&mut self, key: &Q) -> &mut Self::Output {
         self.get_mut(key).expect("no entry found for key")
     }
@@ -205,6 +216,7 @@ impl<'a, K, V, S, const LEN: usize> IntoIterator for &'a HashMap<K, V, S, LEN> {
     type Item = (&'a K, &'a V);
     type IntoIter = Iter<'a, K, V>;
 
+    #[inline]
     fn into_iter(self) -> Iter<'a, K, V> {
         self.iter()
     }
@@ -214,6 +226,7 @@ impl<'a, K, V, S, const LEN: usize> IntoIterator for &'a mut HashMap<K, V, S, LE
     type Item = (&'a K, &'a mut V);
     type IntoIter = IterMut<'a, K, V>;
 
+    #[inline]
     fn into_iter(self) -> IterMut<'a, K, V> {
         self.iter_mut()
     }
@@ -223,6 +236,7 @@ impl<K, V, S, const LEN: usize> IntoIterator for HashMap<K, V, S, LEN> {
     type Item = (K, V);
     type IntoIter = IntoIter<K, V, LEN>;
 
+    #[inline]
     fn into_iter(self) -> IntoIter<K, V, LEN> {
         IntoIter {
             table: ManuallyDrop::new(self.table),
@@ -252,6 +266,7 @@ impl<K, V, const LEN: usize> Iterator for IntoIter<K, V, LEN> {
         }
     }
 
+    #[inline]
     fn size_hint(&self) -> (usize, Option<usize>) {
         (LEN - self.index, Some(LEN - self.index))
     }
@@ -269,6 +284,7 @@ impl<K, V, const LEN: usize> Drop for IntoIter<K, V, LEN> {
 
 impl<K, V, const LEN: usize> FusedIterator for IntoIter<K, V, LEN> {}
 impl<K, V, const LEN: usize> ExactSizeIterator for IntoIter<K, V, LEN> {
+    #[inline]
     fn len(&self) -> usize {
         LEN - self.index
     }
@@ -309,10 +325,12 @@ macro_rules! derive_iter {
         impl<'a, K, V> Iterator for $ty {
             type Item = $item_ty;
 
+            #[inline]
             fn next(&mut self) -> Option<Self::Item> {
                 self.inner.next().map($closure)
             }
 
+            #[inline]
             fn size_hint(&self) -> (usize, Option<usize>) {
                 self.inner.size_hint()
             }
@@ -320,6 +338,7 @@ macro_rules! derive_iter {
 
         impl<'a, K, V> FusedIterator for $ty {}
         impl<'a, K, V> ExactSizeIterator for $ty {
+            #[inline]
             fn len(&self) -> usize {
                 self.inner.len()
             }
@@ -437,11 +456,15 @@ where
         Ok(Table(unsafe { ptr::read(&mut array as *mut _ as *mut _) }))
     }
 
-    fn find(&self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&Node<K, V>> {
+    fn find<Q: ?Sized>(&self, hash: u64, key: &Q) -> Option<&Node<K, V>>
+    where
+        K: Borrow<Q>,
+        Q: Eq,
+    {
         let mut last = (hash % LEN as u64) as usize;
         let mut entry = &self.0[last];
         loop {
-            if predicate(&entry.key) {
+            if entry.key.borrow() == key {
                 break Some(entry);
             }
             if entry.next != last {
@@ -453,11 +476,15 @@ where
         }
     }
 
-    fn find_mut(&mut self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&mut Node<K, V>> {
+    fn find_mut<Q: ?Sized>(&mut self, hash: u64, key: &Q) -> Option<&mut Node<K, V>>
+    where
+        K: Borrow<Q>,
+        Q: Eq,
+    {
         let mut entry_slot = (hash % LEN as u64) as usize;
         let mut entry = &self.0[entry_slot];
         loop {
-            if predicate(&entry.key) {
+            if entry.key.borrow() == key {
                 break Some(entry_slot);
             }
             if entry.next != entry_slot {
@@ -467,6 +494,8 @@ where
                 break None;
             }
         }
+        // borrowck doesnt allow us to early return a mut ref, as this would exclusively borrow it for the rest of the function
+        //  so we have to break out the slot and then reborrow with that
         .map(move |slot| &mut self.0[slot])
     }
 }
