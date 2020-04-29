@@ -9,8 +9,8 @@
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::{BuildHasher, Hash, Hasher};
-use core::iter::{ExactSizeIterator, FromIterator, FusedIterator};
-use core::mem::MaybeUninit;
+use core::iter::{ExactSizeIterator, FusedIterator};
+use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops;
 use core::ptr;
 use core::slice;
@@ -222,36 +222,63 @@ impl<K, V, S, const LEN: usize> IntoIterator for HashMap<K, V, S, LEN> {
     type IntoIter = IntoIter<K, V, LEN>;
 
     fn into_iter(self) -> IntoIter<K, V, LEN> {
-        IntoIter { table: self.table }
+        IntoIter {
+            table: ManuallyDrop::new(self.table),
+            index: 0,
+        }
     }
 }
 
+// fixed size arrays in rust dont currently implement IntoIterator so we have to implement that ourselves
 pub struct IntoIter<K, V, const LEN: usize> {
-    table: Table<K, V, LEN>,
+    table: ManuallyDrop<Table<K, V, LEN>>,
+    index: usize,
 }
 
 impl<K, V, const LEN: usize> Iterator for IntoIter<K, V, LEN> {
     type Item = (K, V);
 
     fn next(&mut self) -> Option<(K, V)> {
-        todo!()
+        if self.index >= LEN {
+            None
+        } else {
+            // SAFETY: We track what has been copied out through the index making sure to not cause a double drop
+            //  when IntoIter drops
+            let node: Node<_, _> = unsafe { ptr::read(&self.table.0[self.index] as *const _) };
+            self.index += 1;
+            Some((node.key, node.value))
+        }
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        todo!()
+        (LEN - self.index, Some(LEN - self.index))
+    }
+}
+
+impl<K, V, const LEN: usize> Drop for IntoIter<K, V, LEN> {
+    fn drop(&mut self) {
+        for ele in &mut self.table.0[self.index..] {
+            // SAFETY: we know that all the elements starting from `index` have not been returned through the
+            //  iterator so we can safely drop them here.
+            unsafe { ptr::drop_in_place(ele) };
+        }
     }
 }
 
 impl<K, V, const LEN: usize> FusedIterator for IntoIter<K, V, LEN> {}
 impl<K, V, const LEN: usize> ExactSizeIterator for IntoIter<K, V, LEN> {
     fn len(&self) -> usize {
-        todo!()
+        LEN - self.index
     }
 }
 
 impl<K: fmt::Debug, V: fmt::Debug, const LEN: usize> fmt::Debug for IntoIter<K, V, LEN> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!()
+        f.debug_map()
+            .entries(Iter {
+                inner: self.table.0.iter(),
+            })
+            .finish()
     }
 }
 
@@ -332,6 +359,7 @@ where
                     .map(|i| i + slot)
                     .find(|&idx| !slot_map[idx % LEN])
                     .expect("bug: array is full");
+                // SAFETY: we checked that the slot is initialized
                 let (prev, next) = unsafe {
                     let slot = array[slot].get_ref();
                     (slot.prev, slot.next)
