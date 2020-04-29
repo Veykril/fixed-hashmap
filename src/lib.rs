@@ -1,11 +1,6 @@
 #![cfg_attr(not(test), no_std)]
-#![feature(
-    const_generics,
-    const_if_match,
-    maybe_uninit_uninit_array,
-    maybe_uninit_slice_assume_init,
-    maybe_uninit_ref
-)]
+#![feature(const_generics, maybe_uninit_uninit_array, maybe_uninit_ref)]
+
 use core::borrow::Borrow;
 use core::fmt;
 use core::hash::{BuildHasher, Hash, Hasher};
@@ -14,6 +9,18 @@ use core::mem::{ManuallyDrop, MaybeUninit};
 use core::ops;
 use core::ptr;
 use core::slice;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IterSizeMismatch;
+
+impl fmt::Display for IterSizeMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "the iterator length did not match up with the HashMap size"
+        )
+    }
+}
 
 fn hash_key<K: Hash + ?Sized>(hash_builder: &impl BuildHasher, key: &K) -> u64 {
     let mut state = hash_builder.build_hasher();
@@ -32,17 +39,12 @@ where
     K: Hash,
     S: BuildHasher + Default,
 {
-    pub fn new<I>(iter: I) -> Self
+    pub fn new<I>(iter: I) -> Result<Self, IterSizeMismatch>
     where
         I: IntoIterator<Item = (K, V)>,
         I::IntoIter: ExactSizeIterator,
     {
-        let hash_builder = S::default();
-        let table = Table::new(&hash_builder, iter);
-        HashMap {
-            hash_builder,
-            table,
-        }
+        Self::with_hasher(iter, S::default())
     }
 }
 
@@ -51,16 +53,16 @@ where
     K: Hash,
     S: BuildHasher,
 {
-    pub fn with_hasher<I>(iter: I, hash_builder: S) -> Self
+    pub fn with_hasher<I>(iter: I, hash_builder: S) -> Result<Self, IterSizeMismatch>
     where
         I: IntoIterator<Item = (K, V)>,
         I::IntoIter: ExactSizeIterator,
     {
-        let table = Table::new(&hash_builder, iter);
-        HashMap {
+        let table = Table::new(&hash_builder, iter)?;
+        Ok(HashMap {
             hash_builder,
             table,
-        }
+        })
     }
 
     pub fn hasher(&self) -> &S {
@@ -337,14 +339,14 @@ impl<K, V, const LEN: usize> Table<K, V, LEN>
 where
     K: Hash,
 {
-    fn new<I>(hash_builder: &impl BuildHasher, iter: I) -> Self
+    fn new<I>(hash_builder: &impl BuildHasher, iter: I) -> Result<Self, IterSizeMismatch>
     where
         I: IntoIterator<Item = (K, V)>,
         I::IntoIter: ExactSizeIterator,
     {
         let iter = iter.into_iter();
         if iter.len() != LEN {
-            unimplemented!("err")
+            return Err(IterSizeMismatch);
         }
 
         // TODO: drop initialized elements on panic. even if we don't panic anywhere, the iterator might
@@ -431,7 +433,8 @@ where
         }
         debug_assert!(slot_map.iter().copied().all(core::convert::identity));
         // SAFETY: the array has been properly initialized
-        Table(unsafe { ptr::read(&mut array as *mut _ as *mut _) })
+        //  Is this the current best way to turn a [MaybeUninit<T>; _] into a [T; _]?
+        Ok(Table(unsafe { ptr::read(&mut array as *mut _ as *mut _) }))
     }
 
     fn find(&self, hash: u64, predicate: impl Fn(&K) -> bool) -> Option<&Node<K, V>> {
@@ -494,7 +497,7 @@ mod test {
 
     #[test]
     fn test_get() {
-        let foo = HashMap::<5>::new(vec![(0, 0), (3, 3), (5, 5), (8, 8), (1, 1)]);
+        let foo = HashMap::<5>::new(vec![(0, 0), (3, 3), (5, 5), (8, 8), (1, 1)]).unwrap();
 
         assert_eq!(foo.get(&0), Some(&0));
         assert_eq!(foo.get(&1), Some(&1));
@@ -506,7 +509,7 @@ mod test {
     #[test]
     fn test_equal_elements() {
         // FIXME should this error, or is this fine and considered a logical error?
-        let foo = HashMap::<2>::new(vec![(0, 0), (0, 0)]);
+        let foo = HashMap::<2>::new(vec![(0, 0), (0, 0)]).unwrap();
 
         assert_eq!(
             foo.table.0,
@@ -529,7 +532,7 @@ mod test {
 
     #[test]
     fn test_single_col() {
-        let foo = HashMap::<2>::new(vec![(0, 0), (2, 2)]);
+        let foo = HashMap::<2>::new(vec![(0, 0), (2, 2)]).unwrap();
 
         assert_eq!(
             foo.table.0,
@@ -552,7 +555,7 @@ mod test {
 
     #[test]
     fn test_tail_col() {
-        let foo = HashMap::<3>::new(vec![(0, 1), (3, 0), (4, 2)]);
+        let foo = HashMap::<3>::new(vec![(0, 1), (3, 0), (4, 2)]).unwrap();
 
         assert_eq!(
             foo.table.0,
@@ -581,7 +584,7 @@ mod test {
 
     #[test]
     fn test_head_col() {
-        let foo = HashMap::<3>::new(vec![(0, 1), (3, 0), (6, 2)]);
+        let foo = HashMap::<3>::new(vec![(0, 1), (3, 0), (6, 2)]).unwrap();
 
         assert_eq!(
             foo.table.0,
@@ -610,7 +613,7 @@ mod test {
 
     #[test]
     fn test_inbetween_col() {
-        let foo = HashMap::<4>::new(vec![(0, 1), (4, 0), (8, 2), (2, 3)]);
+        let foo = HashMap::<4>::new(vec![(0, 1), (4, 0), (8, 2), (2, 3)]).unwrap();
 
         assert_eq!(
             foo.table.0,
