@@ -3,6 +3,7 @@ name = "fixed-hashmap"
 version = "0.1.0"
 authors = ["Lukas Wirth <lukastw97@gmail.com>"]
 edition = "2018"
+description = "An always fully populated fixed size hashmap"
 repository = "https://github.com/Veykril/fixed-hashmap"
 homepage = "https://github.com/Veykril/fixed-hashmap"
 license = "MIT OR Apache-2.0"
