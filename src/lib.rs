@@ -1,5 +1,5 @@
 #![cfg_attr(not(test), no_std)]
-#![feature(const_generics, maybe_uninit_uninit_array, maybe_uninit_ref)]
+#![feature(min_const_generics, maybe_uninit_uninit_array, maybe_uninit_ref)]
 
 use core::borrow::Borrow;
 use core::fmt;
@@ -406,7 +406,7 @@ where
                         .expect("bug: array is full");
                     // SAFETY: we checked that the slot is initialized
                     let (prev, next) = unsafe {
-                        let slot = table[slot].get_ref();
+                        let slot = table[slot].assume_init_ref();
                         (slot.prev, slot.next)
                     };
                     // make room for new node, put previous in a free spot
@@ -427,11 +427,11 @@ where
                         unsafe {
                             // slot was single, so turn it into a tail
                             if next == slot {
-                                table[next_free_slot].get_mut().next = next_free_slot;
+                                table[next_free_slot].assume_init_mut().next = next_free_slot;
                             // otherwise fix links due to element move
                             } else {
-                                table[next].get_mut().prev = next_free_slot;
-                                table[next_free_slot].get_mut().prev = slot;
+                                table[next].assume_init_mut().prev = next_free_slot;
+                                table[next_free_slot].assume_init_mut().prev = slot;
                             }
                         }
                     // Not a head, this new node becomes a new list
@@ -447,15 +447,15 @@ where
                         //  `next` and `prev` have been initialized in an earlier iteration
                         unsafe {
                             // place the new node into the now free slot
-                            table[prev].get_mut().next = next_free_slot;
+                            table[prev].assume_init_mut().next = next_free_slot;
                             // slot was a tail
                             if next == slot {
                                 // uphold tail's invariant of pointing to itself
-                                table[next_free_slot].get_mut().next = next_free_slot;
+                                table[next_free_slot].assume_init_mut().next = next_free_slot;
                             // slot was in the middle of a list
                             } else {
                                 // update invalidated back pointer of the previous second element
-                                table[next].get_mut().prev = next_free_slot;
+                                table[next].assume_init_mut().prev = next_free_slot;
                             }
                         }
                     }
